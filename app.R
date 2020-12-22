@@ -75,7 +75,7 @@ loginpage <-  tagList(
 
 header <- dashboardHeader( title = "PGVWeb", uiOutput("logoutbtn"))
 
-sidebar <- dashboardSidebar(
+sidebar <- dashboardSidebar(width = 250,
   tags$head(tags$style(HTML('.content-wrapper, .main-footer, .right-side {margin-left: 120px;}'))),
   uiOutput("sidebarpanel")) 
 body <- dashboardBody(uiOutput("body"), shinyjs::useShinyjs())
@@ -104,10 +104,9 @@ header <- dashboardHeader(
 sidebar <- dashboardSidebar(
   
   sidebarMenu(
-    # Setting id makes input$tabs give the tabName of currently-selected tab
-    id = "tabs",
+    width = 250,
     
-    #menuItem("Main Menu", tabName = "dashboard", icon = icon("dashboard")),
+    id = "tabs",
     
     #########################################
     ########## Uploading VCF Files ##########
@@ -117,32 +116,29 @@ sidebar <- dashboardSidebar(
              
              ## Define sidebar to search concrete vcf case in the database 
              
-             sidebarSearchForm(textId = "searchText", buttonId = "searchButton",
-                               label = "Search...", icon = shiny::icon("search")
+             selectizeInput(
+               "searchVCF", label = "",
+               choices =  NULL, #c("Search your VCF file" = '', NULL),
+               selected =  NULL,
+               multiple = TRUE,
+               options = list(
+                 placeholder = 'Search your VCF file below',
+                 onInitialize = I('function() { this.setValue(""); }')
+               )
              ),
+
              
-             ## Define an Item to upload only proband
+             ## Define an Item to upload proband
              
-             menuItem("Single case", tabName = "proband",
-                      fileInput("Proband", "Choose VCF Proband File",
-                                accept = c("text/plain",".vcf"))
-             ),
-             
-             ## Define an Item to upload trio case
-             
-             #menuItem("Trio Case", tabName = "trio",
-             #        fileInput("Proband", "Choose VCF Proband File", 
-             #                 accept = c("text/plain",".vcf")),
-             #         fileInput("Mother", "Choose VCF Mother File",
-             #                   accept = c("text/plain",".vcf")),
-             #         fileInput("Father", "Choose VCF Father File",
-             #                   accept = c("text/plain",".vcf"))
-                      
-             #),
-             
-             ## Define the button to upload files
-             
-             actionButton("button", "Upload Files")        
+             fileInput("Proband", "Choose VCF Proband File",
+                       accept = c("text/plain",".vcf")),
+             # Specify the name of the file
+             div(style="display: inline-block; width: 50%;",
+                 textInput("VCFNumbercase", "CaseNumber")),
+             # Upload Files
+             div(style="display: inline-block; width: 4%;",
+                 actionButton("button", "Upload Files"))
+    
     ),
     
     ## DEFINE FILTERS 
@@ -171,8 +167,6 @@ sidebar <- dashboardSidebar(
              menuItem("Frequency", tabName = "filter2",
                       numericInput("gnomad", label = "gnomAD",
                                    value = 0.05, min = 0, max = 1, step = 0.001)
-                      # numericInput("exac", label = "ExAC",
-                      #              value = 0.05)
                       
              ),
              
@@ -200,7 +194,6 @@ sidebar <- dashboardSidebar(
                                            "YLinked" = 6,
                                            "Somatic Mutation" = 7,
                                            "Somatic Mosaicism" = 8,
-                                           # "Mitochondrial" = 9,
                                            "Multifactorial" = 9,
                                            "Other" = 10),
                                          selected = c(1,2,3,4,5))
@@ -216,18 +209,8 @@ sidebar <- dashboardSidebar(
              ## Define an Item to upload coverage file
              fileInput("coverage", "Choose txt Coverage File",
                        accept = c("text/plain",".txt"))
-             #, actionButton("coverage", "Apply Coverage File")
-             
     )
-  ),
-  
-  sidebarMenu(
-    menuItemOutput("menuitem")
   )
-  
-  #sidebarSearchForm(textId = "searchText2", buttonId = "searchButton2",
-  #                  label = "Search..."
-  #)
 )
 
 ##################################
@@ -259,13 +242,9 @@ body <- dashboardBody(
              box(width = 12, 
                  title = "Gene Coverage", status = "warning", collapsible = TRUE,
                  DT::dataTableOutput("coverage")
-                 # textOutput("coverage")
-                 #     sliderInput("slider", "Number of observations:", 1, 100, 50)
              )
              
     )
-    , textOutput("prueba") 
-    ,textOutput("res")
   )
   
 )
@@ -288,7 +267,12 @@ server = (function(input, output,session) {
   
   USER <- reactiveValues(Logged = Logged)
   
+  ############################
+  ##      USER LOGGING      ##
+  ############################
+  
   # Cheking if the user exists in the database
+  
   observe({ 
     if (USER$Logged == FALSE) {
       if (!is.null(input$Login)) {
@@ -329,11 +313,23 @@ server = (function(input, output,session) {
     }
   })
   
-  observe({
-    req(input$sidebarItemExpanded)
-    if (input$sidebarItemExpanded == "Filters") {
-      updateSelectizeInput(session = session, inputId = 'hpoterms', 
-                           choices = c(selectList), server = TRUE)
+ 
+  # Display a list of all cases available for the user
+  
+  observe({ 
+    if (USER$Logged == TRUE) {
+      Username <- isolate(input$userName)
+      query <- sprintf({"
+        SELECT * 
+        FROM '%s'"}, Username, serialize=F) 
+      db   <- RSQLite::dbConnect(RSQLite::SQLite(), dbname="db.sqlite")
+      userVCFiles <- RSQLite::dbGetQuery(db, query) 
+      RSQLite::dbDisconnect(db)
+      selectvcfList <-  c(paste(userVCFiles$numbercase))
+        updateSelectizeInput(session = session, inputId = 'searchVCF',
+                             choices = c(selectvcfList), server = TRUE)
+        updateSelectizeInput(session = session, inputId = 'hpoterms', 
+                             choices = c(selectList), server = TRUE)
     }
   })
 
@@ -341,295 +337,317 @@ server = (function(input, output,session) {
   #####################################
   #####        VCF INFORMATION    #####
   #####################################
+  
   tabla <- reactiveValues(vcf=NULL)
   
   
   observeEvent(input$button, {
-    req(input$Proband)
-    inFile <- input$Proband
     
-    if (is.null(inFile))
-      return(NULL)
+    ############################
+    ##   SEARCHING VCF FILE   ##
+    ############################
     
-    ## CONECTAR CON SQLite
-    
-    print("leyendo el vcf")
-    start_time <- Sys.time()
-    
-    vcfData <- read.vcfR(inFile$datapath)
-    
-    end_time <- Sys.time()
-    print("vcf leido")
-    print(end_time - start_time)
-    #####################################
-    #####   EXTRACTING VCF INFO     #####
-    #####################################
-    print("extrayendo gt")
-    start_time <- Sys.time()
-    
-    
-    #Extract genotype
-    gt <- extract.gt(vcfData, element = 'GT')
-    #Extract allele frequency
-    ad <- extract.gt(vcfData, element = 'AD')
-    allele1 <- masplit(ad, record = 1, delim=",", sort = 0)
-    allele2 <- masplit(ad, record = 2, delim=",", sort = 0)
-    ad1 <- allele1 / (allele1 + allele2)
-    ad2 <- allele2 / (allele1 + allele2)
-    
-    #Heterozygotes
-    hets <- is_het(gt)
-    for (i in 1:nrow(hets)) {
-      if (hets[i] == TRUE) {hets[i] = "Het"}
-      else {hets[i] = "Hom"}
-    }
-    
-    
-    end_time <- Sys.time()
-    print("gt extraido")
-    print(end_time - start_time)
-    
-    print("vcftidy")
-    start_time <- Sys.time()
-    
-    #Extract info
-    Z <- vcfR2tidy(vcfData, info_only = TRUE)
-    
-    end_time <- Sys.time()
-    print("vcftidy finalizado")
-    print(end_time - start_time)
-    
-    print("split")
-    start_time <- Sys.time()
-    
-    vcfInfo <- cSplit(Z$fix, "ANN", "|", stripWhite = FALSE)
-    
-    end_time <- Sys.time()
-    print("split finalizado")
-    print(end_time - start_time)
-    
-    vcfInfo <- cbind(vcfInfo[,1:86], round(ad2,2), hets)
-    d <- c("AF_gnomAD_raw","Homozygotes","CADD","DANN","GERP","MutationTaster",
-           "Polyphen2","SIFT","FATHMM","PhastCons30","PhyloP30","Allele", 
-           "Annotation",  "AnnotationImpact","GeneName", "GeneID" ,
-           "FeatureType", "FeatureID" ,"TranscriptBioType", "Rank" , "HGVS.c", 
-           "HGVS.p", "cDNA.pos/cDNA.length","CDS.pos/CDS.length", 
-           "AA.pos/AA.length","Distance", "ERRORS/WARNINGS/INFO", 
-           "AlleleFrequency", "Zigosity")
-    colnames(vcfInfo)[60:88] <- d
-    
-    #names(vcfInfo)[names(vcfInfo) == "CLNSIG"] <- "ClinVar"
-    
-    vcfInfo$ALLELEID <- as.character(vcfInfo$ALLELEID)
-    vcfInfo %>% mutate_if(is.factor, as.character) -> vcfInfo
-    
-    
-    #####################################
-    ##### ADDING NEW INFORMATION VCF ####
-    #####################################
-    
-    
-    #####################################################################################
-    annotatePhenotype <- function(df,db) {
-      # df -> dataframe a anotar
-      # db -> base de datos OMIM HPO
-      # OUTPUT ->  dataframe con columnas anadidas
+    if (!is.null(input$searchVCF)) {
+      if (length(input$searchVCF) == 1) {
+        vcfFile <- isolate(input$searchVCF)
+        query <- sprintf({"
+          SELECT * 
+          FROM '%s'"}, vcfFile, serialize=F) 
+        db   <- RSQLite::dbConnect(RSQLite::SQLite(), dbname="db.sqlite")
+        vcfInfo <- RSQLite::dbGetQuery(db, query) 
+        RSQLite::dbDisconnect(db)
+        tabla$vcf <- vcfInfo
+        }
       
-      MIMNumberVec<-rep("",nrow(df))
-      InheritanceVec<-rep("",nrow(df))
-      PhenotypesVec<-rep("",nrow(df))
-      HPOTermNameVec <- rep("",nrow(df))
-      HPOTermIDVec <- rep("",nrow(df))
-      
-      for (i in 1:nrow(df)){
+      } else {
         
-        x<-df$GENE_ID[i]
+        ############################
+        ##   UPLOADING VCF FILE   ##
+        ############################
         
-        if (x=="" | x=="NA"| is.na(x)) next
-        ids <- unlist(strsplit(x, ","))
+        req(input$Proband)
+        inFile <- input$Proband
         
-        MIMNumber <- ""
-        Inheritance <- ""
-        Phenotypes <- ""
-        HPOTermName <- ""
-        HPOTermID <- ""
+        if (is.null(inFile))
+          return(NULL)
         
-        for (id in ids) {
-          
-          ma<-match(id,db$EntrezGeneID)
-          MIMNumber <- c(MIMNumber,db[ma,"MIMNumber"])
-          Inheritance <- c(Inheritance,db[ma,"Inheritance"])
-          Phenotypes <- c(Phenotypes,db[ma,"Phenotypes"])
-          HPOTermName <- c(HPOTermName,db[ma,"HPOTermName"])
-          HPOTermID <- c(HPOTermID,db[ma,"HPOTermID"])
+        print("leyendo el vcf")
+        start_time <- Sys.time()
+        
+        vcfData <- read.vcfR(inFile$datapath)
+        
+        end_time <- Sys.time()
+        print("The VCF has already been read")
+        print(end_time - start_time)
+        
+        #####################################
+        #####   EXTRACTING VCF INFO     #####
+        #####################################
+        
+        print("Extracting the genotype")
+        start_time <- Sys.time()
+        
+        
+        #Extract genotype
+        gt <- extract.gt(vcfData, element = 'GT')
+        #Extract allele frequency
+        ad <- extract.gt(vcfData, element = 'AD')
+        allele1 <- masplit(ad, record = 1, delim=",", sort = 0)
+        allele2 <- masplit(ad, record = 2, delim=",", sort = 0)
+        ad1 <- allele1 / (allele1 + allele2)
+        ad2 <- allele2 / (allele1 + allele2)
+        
+        #Heterozygotes
+        hets <- is_het(gt)
+        for (i in 1:nrow(hets)) {
+          if (hets[i] == TRUE) {hets[i] = "Het"}
+          else {hets[i] = "Hom"}
         }
         
-        MIMNumber <- MIMNumber[(MIMNumber!="" & !is.na(MIMNumber))]
-        MIMNumberVec[i]<-paste(MIMNumber, collapse=", ")
         
-        Inheritance <- Inheritance[(Inheritance!="" & !is.na(Inheritance))]
-        InheritanceVec[i]<-paste(Inheritance, collapse=", ")
+        end_time <- Sys.time()
+        print("The genotype has already extracted")
+        print(end_time - start_time)
         
-        Phenotypes <- Phenotypes[(Phenotypes!="" & !is.na(Phenotypes))]
-        PhenotypesVec[i]<-paste(Phenotypes, collapse=", ")
+        print("vcftidy")
+        start_time <- Sys.time()
         
-        HPOTermName <- HPOTermName[(HPOTermName!="" & !is.na(HPOTermName))]
-        HPOTermNameVec[i]<-paste(HPOTermName, collapse=", ")
+        #Extract info
+        Z <- vcfR2tidy(vcfData, info_only = TRUE)
         
-        HPOTermID <- HPOTermID[(HPOTermID!="" & !is.na(HPOTermID))]
-        HPOTermIDVec[i]<-paste(HPOTermID, collapse=", ")
+        end_time <- Sys.time()
+        print("vcftidy finished")
+        print(end_time - start_time)
+        
+        print("Split the VCF")
+        start_time <- Sys.time()
+        
+        vcfInfo <- cSplit(Z$fix, "ANN", "|", stripWhite = FALSE)
+        
+        end_time <- Sys.time()
+        print("Split finished")
+        print(end_time - start_time)
+        
+        vcfInfo <- cbind(vcfInfo[,1:86], round(ad2,2), hets)
+        d <- c("AF_gnomAD_raw","Homozygotes","CADD","DANN","GERP","MutationTaster",
+               "Polyphen2","SIFT","FATHMM","PhastCons30","PhyloP30","Allele", 
+               "Annotation",  "AnnotationImpact","GeneName", "GeneID" ,
+               "FeatureType", "FeatureID" ,"TranscriptBioType", "Rank" , "HGVS.c", 
+               "HGVS.p", "cDNA.pos/cDNA.length","CDS.pos/CDS.length", 
+               "AA.pos/AA.length","Distance", "ERRORS/WARNINGS/INFO", 
+               "AlleleFrequency", "Zigosity")
+        colnames(vcfInfo)[60:88] <- d
+    
+        
+        vcfInfo$ALLELEID <- as.character(vcfInfo$ALLELEID)
+        vcfInfo %>% mutate_if(is.factor, as.character) -> vcfInfo
+        
+        
+        #####################################
+        ##### ADDING NEW INFORMATION VCF ####
+        #####################################
+        
+        #Annotate OMIM and HPO database
+
+        annotatePhenotype <- function(df,db) {
+
+          MIMNumberVec<-rep("",nrow(df))
+          InheritanceVec<-rep("",nrow(df))
+          PhenotypesVec<-rep("",nrow(df))
+          HPOTermNameVec <- rep("",nrow(df))
+          HPOTermIDVec <- rep("",nrow(df))
+          
+          for (i in 1:nrow(df)){
+            
+            x<-df$GENE_ID[i]
+            
+            if (x=="" | x=="NA"| is.na(x)) next
+            ids <- unlist(strsplit(x, ","))
+            
+            MIMNumber <- ""
+            Inheritance <- ""
+            Phenotypes <- ""
+            HPOTermName <- ""
+            HPOTermID <- ""
+            
+            for (id in ids) {
+              
+              ma<-match(id,db$EntrezGeneID)
+              MIMNumber <- c(MIMNumber,db[ma,"MIMNumber"])
+              Inheritance <- c(Inheritance,db[ma,"Inheritance"])
+              Phenotypes <- c(Phenotypes,db[ma,"Phenotypes"])
+              HPOTermName <- c(HPOTermName,db[ma,"HPOTermName"])
+              HPOTermID <- c(HPOTermID,db[ma,"HPOTermID"])
+            }
+            
+            MIMNumber <- MIMNumber[(MIMNumber!="" & !is.na(MIMNumber))]
+            MIMNumberVec[i]<-paste(MIMNumber, collapse=", ")
+            
+            Inheritance <- Inheritance[(Inheritance!="" & !is.na(Inheritance))]
+            InheritanceVec[i]<-paste(Inheritance, collapse=", ")
+            
+            Phenotypes <- Phenotypes[(Phenotypes!="" & !is.na(Phenotypes))]
+            PhenotypesVec[i]<-paste(Phenotypes, collapse=", ")
+            
+            HPOTermName <- HPOTermName[(HPOTermName!="" & !is.na(HPOTermName))]
+            HPOTermNameVec[i]<-paste(HPOTermName, collapse=", ")
+            
+            HPOTermID <- HPOTermID[(HPOTermID!="" & !is.na(HPOTermID))]
+            HPOTermIDVec[i]<-paste(HPOTermID, collapse=", ")
+          }
+          
+          df$MIMNumber <- MIMNumberVec
+          df$Inheritance <- InheritanceVec
+          df$Phenotypes <- PhenotypesVec
+          df$HPOTermName <- HPOTermNameVec
+          df$HPOTermID <- HPOTermIDVec
+          
+          return(df)
+        }
+        #####################################################################################
+        
+        print("Adding OMIM-HPO terms")
+        start_time <- Sys.time()
+        
+        vcfInfo<-annotatePhenotype(vcfInfo,hpo_omim)
+        
+        end_time <- Sys.time()
+        print(end_time - start_time)
+        
+        print("The OMIM-HPO terms have already added")
+        
+        #####################################
+        ##### ADDING NEW INFORMATION VCF ####
+        #####################################
+        
+        for (i in 1:nrow(vcfInfo)) {
+          if (is.na(vcfInfo$CLNSIG[i]) == FALSE && 
+              grepl("Conflicting_interpretations_of_pathogenicity", 
+                    vcfInfo$CLNSIG[i], fixed = TRUE) == TRUE) {
+            
+            vcfInfo$CLNSIG[i] <- vcfInfo$CLNSIGCONF[i]
+          }
+          
+          ClassificationVec[i] <- paste0('<div class=\"form-group shiny-input-container\" style=\"width: 100px;\">\n  <label class=\"control-label\" for=\"sel'
+                                              ,i,'\"></label>\n  <div>\n    <select id=\"sel',i,'\"><option value=\"Not Classified\" selected>Not Classified</option>\n<option value=\"Pathogenic\">Pathogenic</option>\n<option value=\"Likely Pathogenic\">Likely Pathogenic</option>\n<option value=\"Uncertain Significance\">Uncertain Significance</option>\n<option value=\"Likely Bening\">Likely Bening</option>\n<option value=\"Bening\">Bening</option></select>\n    <script type=\"application/json\" data-for=\"sel', i,'\" data-nonempty=\"\">{}</script>\n  </div>\n</div>"')
+          
+        }
+        vcfInfo$Classification <- ClassificationVec
+        
+        # Making links
+        print("Adding links")
+        
+        
+        makingLinks <- function(df) {
+          
+          GeneVec<-rep("",nrow(df))
+          ClinVarVec<-rep("",nrow(df))
+          AF_gnomADVec<-rep("",nrow(df))
+          dbSNPVec <- rep("",nrow(df))
+          MIMNumberVec <- rep("",nrow(df))
+          
+          for (i in 1:nrow(df)){
+            
+            GeneID <- df$GENE_ID[i]
+            AlleleID <- df$ALLELEID[i]
+            ID <- df$ID[i]
+            GeneName <- df$GeneName[i]
+            CLNSIG <- df$CLNSIG[i]
+            AF_gnomAD_raw <- df$AF_gnomAD_raw[i]
+            MIMNumber_raw <- unique(df$MIMNumber[i])
+            
+            Gene <- ""
+            ClinVar <- ""
+            AF_gnomAD <- ""
+            dbSNP <- ""
+            MIMNumber <- ""
+            
+            if(!is.na(ID))            {dbSNP <- paste0('<a href=\"https://www.ncbi.nlm.nih.gov/snp/',ID,'\" target=\"_blank\">',ID,'</a>')}
+            if(!is.na(GeneName))      {Gene <- paste0('<a href=\"https://www.ncbi.nlm.nih.gov/gene?Db=gene&amp;Cmd=DetailsSearch&amp;Term=',GeneID,'\" target=\"_blank\">',GeneName,'</a>')}
+            if(!is.na(CLNSIG))        {ClinVar <- paste0('<a href=\"https://www.ncbi.nlm.nih.gov/clinvar/?term=',AlleleID,'[alleleid]\" target=\"_blank\">',CLNSIG,'</a>')} 
+            if(!is.na(AF_gnomAD_raw)) {AF_gnomAD <- paste0('<a href=\"https://gnomad.broadinstitute.org/variant/',ID,'?dataset=gnomad_r2_1_controls\" target=\"_blank\">',AF_gnomAD_raw,'</a>')} 
+            if(!is.na(MIMNumber_raw)) {MIMNumber <- paste0('<a href=\"https://www.omim.org/entry/',MIMNumber_raw,'\" target=\"_blank\">',MIMNumber_raw,'</a>')} 
+            
+            GeneVec[i] <- Gene
+            ClinVarVec[i] <- ClinVar
+            AF_gnomADVec[i] <- AF_gnomAD
+            dbSNPVec[i] <- dbSNP
+            MIMNumberVec[i] <- MIMNumber
+            
+          }
+          
+          df$Gene <- GeneVec
+          df$ClinVar <- ClinVarVec
+          df$AF_gnomAD <- AF_gnomADVec
+          df$dbSNP <- dbSNPVec
+          df$MIMNumber <- MIMNumberVec
+          
+          return(df)
+        }
+        
+        vcfInfo <- makingLinks(vcfInfo)
+        
+        end_time <- Sys.time()
+        print("The links have already added")
+        print(end_time - start_time)
+
+        
+        #####################################
+        #####        FILTERING VCF      #####
+        #####################################
+        
+        print("Quality filtering")
+        print(nrow(vcfInfo))
+        ##QUALITY FILTERS (AUTOMATIC)
+        
+        vcfInfo <- vcfInfo[-c(which(
+          vcfInfo$QD < 2.0 | #Quality by Depth
+            vcfInfo$MQ < 40.0 | #MappingQuality
+            vcfInfo$MQRankSum < -12.5 | #Z-scoreMappingQuality
+            vcfInfo$FS > 60.0 | #Fisher Test to detect Strand-bias
+            vcfInfo$SOR > 3.0 | #Symmetric Odds Ratio to detect Strand-bias
+            vcfInfo$QUAL < 30.0 | #Quality
+            vcfInfo$ReadPosRankSum < -8.0 | #Z-score read position bias
+            grepl("unknown_transcript_1", vcfInfo$FeatureID, fixed = TRUE) == TRUE |
+            grepl("XR", vcfInfo$FeatureID, fixed = TRUE) == TRUE |
+            grepl("XM", vcfInfo$FeatureID, fixed = TRUE) == TRUE)),]
+        
+        end_time <- Sys.time()
+        print("VCF filtered")
+        print(nrow(vcfInfo))
+        print(end_time - start_time)
+        
+        
+        #####################################
+        #####      SAVING VCF INFO      #####
+        #####################################
+        
+        #Saving into reactive value
+        tabla$vcf <- vcfInfo
+        
+        #Saving in to the sqlite database
+        Username <- isolate(input$userName)
+        db    <- RSQLite::dbConnect(RSQLite::SQLite(), dbname="db.sqlite")
+        query <- sprintf({"
+          INSERT INTO '%s' 
+          VALUES ('%s')"}, Username, input$VCFNumbercase, serialize=F)
+        newcase <- NULL
+        newcase <- RSQLite::dbExecute(db, query)
+        if (!is.null(newcase)) {
+          SavevcfInfo <- NULL
+          SavevcfInfo <- RSQLite::dbWriteTable(con, input$VCFNumbercase, vcfInfo, overwrite = FALSE)
+          if (!is.null(SavevcfInfo)) {
+            print("VCF save succesfully")
+          } else {
+            print("An error occur when the VCF was saved")
+          }
+        } else {
+          print("This numbercase already exists")
+        }
+        RSQLite::dbDisconnect(db)
+        
       }
-      
-      df$MIMNumber <- MIMNumberVec
-      df$Inheritance <- InheritanceVec
-      df$Phenotypes <- PhenotypesVec
-      df$HPOTermName <- HPOTermNameVec
-      df$HPOTermID <- HPOTermIDVec
-      
-      return(df)
-    }
-    #####################################################################################
     
-    print("anadiendo omim-hpo")
-    start_time <- Sys.time()
-    
-    vcfInfo<-annotatePhenotype(vcfInfo,hpo_omim)
-    
-    end_time <- Sys.time()
-    print(end_time - start_time)
-    
-    print("omim-hpo anadido")
-    
-    #####################################
-    ##### ADDING NEW INFORMATION VCF ####
-    #####################################
-    
-    print("arreglando la db")
-    start_time <- Sys.time()
-    
-    for (i in 1:nrow(vcfInfo)) {
-      if (is.na(vcfInfo$CLNSIG[i]) == FALSE && 
-          grepl("Conflicting_interpretations_of_pathogenicity", 
-                vcfInfo$CLNSIG[i], fixed = TRUE) == TRUE) {
-        
-        vcfInfo$CLNSIG[i] <- vcfInfo$CLNSIGCONF[i]
-      }
-    }
-    
-    gene_id <- vcfInfo$GENE_ID
-    allele_id <- vcfInfo$ALLELEID
-    rs <- vcfInfo$ID
-    
-    # Making links
-    print("anadiendo links")
-    
-    
-    makingLinks <- function(df) {
-      
-      GeneVec<-rep("",nrow(df))
-      ClinVarVec<-rep("",nrow(df))
-      AF_gnomADVec<-rep("",nrow(df))
-      dbSNPVec <- rep("",nrow(df))
-      MIMNumberVec <- rep("",nrow(df))
-      
-      for (i in 1:nrow(df)){
-        
-        GeneID <- df$GENE_ID[i]
-        AlleleID <- df$ALLELEID[i]
-        ID <- df$ID[i]
-        GeneName <- df$GeneName[i]
-        CLNSIG <- df$CLNSIG[i]
-        AF_gnomAD_raw <- df$AF_gnomAD_raw[i]
-        MIMNumber_raw <- unique(df$MIMNumber[i])
-        
-        Gene <- ""
-        ClinVar <- ""
-        AF_gnomAD <- ""
-        dbSNP <- ""
-        MIMNumber <- ""
-        
-        if(!is.na(ID))            {dbSNP <- paste0('<a href=\"https://www.ncbi.nlm.nih.gov/snp/',ID,'\" target=\"_blank\">',ID,'</a>')}
-        if(!is.na(GeneName))      {Gene <- paste0('<a href=\"https://www.ncbi.nlm.nih.gov/gene?Db=gene&amp;Cmd=DetailsSearch&amp;Term=',GeneID,'\" target=\"_blank\">',GeneName,'</a>')}
-        if(!is.na(CLNSIG))        {ClinVar <- paste0('<a href=\"https://www.ncbi.nlm.nih.gov/clinvar/?term=',AlleleID,'[alleleid]\" target=\"_blank\">',CLNSIG,'</a>')} 
-        if(!is.na(AF_gnomAD_raw)) {AF_gnomAD <- paste0('<a href=\"https://gnomad.broadinstitute.org/variant/',ID,'?dataset=gnomad_r2_1_controls\" target=\"_blank\">',AF_gnomAD_raw,'</a>')} 
-        if(!is.na(MIMNumber_raw)) {MIMNumber <- paste0('<a href=\"https://www.omim.org/entry/',MIMNumber_raw,'\" target=\"_blank\">',MIMNumber_raw,'</a>')} 
-        
-        GeneVec[i] <- Gene
-        ClinVarVec[i] <- ClinVar
-        AF_gnomADVec[i] <- AF_gnomAD
-        dbSNPVec[i] <- dbSNP
-        MIMNumberVec[i] <- MIMNumber
-        
-      }
-      
-      df$Gene <- GeneVec
-      df$ClinVar <- ClinVarVec
-      df$AF_gnomAD <- AF_gnomADVec
-      df$dbSNP <- dbSNPVec
-      df$MIMNumber <- MIMNumberVec
-      
-      return(df)
-    }
-    
-    vcfInfo <- makingLinks(vcfInfo)
-    
-    end_time <- Sys.time()
-    print("link listos")
-    print(end_time - start_time)
-    # 
-    # vcfInfo$MIMNumber <- sapply(vcfInfo$MIMNumber, function(x)
-    #   toString(tags$a(href=paste0("https://www.omim.org/entry/", x),
-    #                   x, target="_blank" )))
-    
-    #####################################
-    #####        FILTERING VCF      #####
-    #####################################
-    
-    print("Filtrando por calidad")
-    print(nrow(vcfInfo))
-    ##QUALITY FILTERS (AUTOMATIC)
-    
-    vcfInfo <- vcfInfo[-c(which(
-      vcfInfo$QD < 2.0 | #Quality by Depth
-        vcfInfo$MQ < 40.0 | #MappingQuality
-        vcfInfo$MQRankSum < -12.5 | #Z-scoreMappingQuality
-        vcfInfo$FS > 60.0 | #Fisher Test to detect Strand-bias
-        vcfInfo$SOR > 3.0 | #Symmetric Odds Ratio to detect Strand-bias
-        vcfInfo$QUAL < 30.0 | #Quality
-        vcfInfo$ReadPosRankSum < -8.0 | #Z-score read position bias
-        grepl("unknown_transcript_1", vcfInfo$FeatureID, fixed = TRUE) == TRUE |
-        grepl("XR", vcfInfo$FeatureID, fixed = TRUE) == TRUE |
-        grepl("XM", vcfInfo$FeatureID, fixed = TRUE) == TRUE)),]
-    
-    end_time <- Sys.time()
-    print("VCF filtrado")
-    print(nrow(vcfInfo))
-    print(end_time - start_time)
-    
-    
-    #####################################
-    #####      SAVING VCF INFO      #####
-    #####################################
-    
-    #Saving into reactive value
-    tabla$vcf <- vcfInfo
-    
-    #Saving in to the sqlite database
-    
-    # con <- dbConnect(SQLite(), dbname="db.sqlite")
-    # numbercase <- "5693"
-    # statement2 <- paste("INSERT INTO", user, "VALUES ('",numbercase,"')")
-    # 
-    # dbExecute(con, statement2)
-    # 
-    # vcfInfo_load <- as_tibble(data.frame(vcfInfo))
-    # analisis2_load <- as.data.frame(analisis2)
-    # 
-    # dbWriteTable(con, numbercase, analisis2_load)
-    # 
-    # vcfInfo <- dbWriteTable(con, "HPO_OMIM", hpo_omim, rownames = TRUE)
-    
-    #observeEvent(input$filter, {
     
   })
   
@@ -638,12 +656,11 @@ server = (function(input, output,session) {
   #######################################
   
   observeEvent(input$filter, {
-    # output$test <- DT::renderDataTable({
-    
+
     #Charging reactive value
     
     req(tabla$vcf)
-    print("filtrando con filtros customizables")
+    print("Custom filters")
     start_time <- Sys.time()
     
     vcfInfo <- tabla$vcf
@@ -653,11 +670,7 @@ server = (function(input, output,session) {
     #####################################
     #####        FILTERING VCF      #####
     #####################################
-    
-    ##CUSTOM FILTERS
-    
-    print("Aplicando fitros customizables")
-    start_time <- Sys.time()
+
     
     ## HPO FILTERS
     
@@ -676,11 +689,8 @@ server = (function(input, output,session) {
     
     
     ## VARIANT TYPE FILTERS
-    print( "filtros del typoe de variante")
     filters <- paste(input$checkGroup,collapse="")
-    paste0(filters)
-    
-    
+
     analysis1 <- data.frame()
     analysis2 <- data.frame()
     analysis3 <- data.frame()
@@ -742,32 +752,19 @@ server = (function(input, output,session) {
     AnalysisList <- list(analysis1,analysis2,analysis3, analysis4, analysis5)
     analysis <- rbindlist(AnalysisList)
     analysis <- unique(analysis)
-    print(nrow(analysis))
-    # analysis <- rbind(analysis1,analysis2,analysis3, analysis4, analysis5)
-    
-    
-    # analysis <- rbind(Benign, LikelyBenign, Uncertain, LikelyPathogenic, 
-    #                   Pathogenic, Conflicting, Other, NotClinVar)
-    
-    
-    print("filtros de frecuencia")
-    #Filtros de frecuencia
+
+
+    #FREQUENCY FILTERS
     analysis <- analysis[which(is.na(analysis$AF_gnomAD_raw) == TRUE |
                                  round(as.numeric(analysis$AF_gnomAD_raw),2) <= 
                                  input$gnomad),]
-    print(nrow(analysis))
-    # end_time <- Sys.time()
-    # print("vcf filtrado automatico")
-    # print(end_time - start_time)
-    
-    
+
     
     #####################################
     #####      PRIORIZATION VCF     #####
     #####################################
     
     filters3 <- paste(input$checkGroup3,collapse="")
-    paste0(filters3)
     
     AutosomalDominant <- data.frame()
     AutosomalRecessive <- data.frame()
@@ -849,15 +846,9 @@ server = (function(input, output,session) {
     analysis <- rbindlist(AnalysisList3)
     
     analysis <- unique(analysis)
-    # analysis <- rbind(AutosomalDominant,AutosomalRecessive,XLinkedDominant,
-    #                   XLinkedRecessive,XLinked,YLinked,SomaticMutation,
-    #                   SomaticMosaicism,Multifactorial,Mitochondrial,
-    #                   OtherInheritance)
     
-    # FILTROS CLINVAR (incluyentes)
-    print("filtros clinvar")
+    # CLINVAR FILTERS
     filters2 <- paste(input$checkGroup2,collapse="")
-    paste0(filters2)
     
     Benign <- data.frame()
     LikelyBenign <- data.frame()
@@ -973,7 +964,7 @@ server = (function(input, output,session) {
     
     analysis <- unique(analysis)
     
-    AnalysisCol <- c('CHROM','POS','REF','ALT','Gene','FeatureID','HGVS.c',
+    AnalysisCol <- c('Classification','CHROM','POS','REF','ALT','Gene','FeatureID','HGVS.c',
                      'HGVS.p','Rank','AlleleFrequency','Zigosity','Annotation',
                      'dbSNP','ClinVar','Phenotypes','Inheritance', 'MIMNumber',
                      'GENE_ID','AF_ESP','AF_EXAC','AF_gnomAD','Homozygotes',
@@ -987,11 +978,8 @@ server = (function(input, output,session) {
     end_time <- Sys.time()
     print(nrow(analysis
     ))
-    print("filtros customizables aplicados")
+    print("Custom filters finished")
     print(end_time - start_time)
-    # analysis <- analysis[,c(1,2,4:5,89,77,80:81,79,72,92,90,95,94,93,10:11,91,
-    # 61,73,62,64:70,87:88,6,30)]
-    
     
     # #ORDERING
     # chromList <- c(sprintf("chr%d", 1:22), "chrX", "chrY")
@@ -1001,17 +989,7 @@ server = (function(input, output,session) {
     # analysis <- analysis[order(analysis$CHROM),]
     
     bc <- as_tibble(data.frame(analysis))
-    print(nrow(bc))
-    
-    # # analysis1 <- cbind(analysis[,c(1,2,4:5,89,77,80:81,79,72,92,90,95,94,93,
-    # #                               10:11,91,61,73,62,64:70,87:88,6,30)])
-    # 
-    # bc <- as_tibble(data.frame(analysis1))
-    
-    
-    end_time <- Sys.time()
-    print("df arreglada")
-    print(end_time - start_time)
+
     #####################################
     #####      PRINT THE TABLE      #####
     #####################################
@@ -1025,7 +1003,7 @@ server = (function(input, output,session) {
         selection = 'single',
         options = list(scrollY = 650,
                        scrollX = 500,
-                       autoWidth = T,
+                       autoWidth = FALSE,
                        deferRender = TRUE,
                        scroller = TRUE,
                        #paging = TRUE,
@@ -1035,13 +1013,13 @@ server = (function(input, output,session) {
                                            visible = FALSE)),
                        dom = 'lBfrtip',
                        fixedColumns = TRUE,
+                       columnDefs=list(list(targets='_all', class="dt-center")),
                        initComplete = JS(
                          "function(settings, json) {",
                          "$(this.api().table().header()).css({'background-color': '#F9B198', 'color': '#fff'});",
                          "}"
                        )),
         rownames = FALSE)
-      #})  
       
     })
     
@@ -1060,9 +1038,6 @@ server = (function(input, output,session) {
       s <- input$test_rows_selected
       
       geneCov <- cov[which(cov$GENE_ID == analysis$GENE_ID[s]),]
-      # if (nrow(geneCov) != 0) {
-      #   geneCov$GENE_ID <- analysis$GeneName[s]
-      # }
       
       if (!is.null(cov)) {
         
@@ -1088,37 +1063,17 @@ server = (function(input, output,session) {
     
   })
   
-  #output$prueba <- renderText({
-  #  paste("You've selected:", input$hpoterms, input$filter1, input$coding)
-  #})
-  
-  output$prueba <- renderPrint({
-    f <- function (x) {
-      return(x)
-      #if (grepl("1", x, fixed = TRUE) == TRUE && 
-      #    grepl("2", x, fixed = TRUE)) {
-      #  "coding and splicing"
-      #}
-    }
-    f(input$checkGroup)
-    #input$checkGroup
-  })
-  
   ######################################
   #####  SAVING USER SESSION INFO  #####
   ######################################
 
   
-  users_data <- data.frame(START = Sys.time()) #USERS = session$user
+  users_data <- data.frame(START = Sys.time()) 
   
-  # This code will be run after the client has disconnected
-  session$onSessionEnded(function() { #userID = users_data$USERS
-    #if(userID==1){
+  session$onSessionEnded(function() {
     users_data$END <- Sys.time()
-    # Write a file in your working directory
     write.table(x = users_data, file = file.path(getwd(), "users_data.txt"),
                 append = TRUE, row.names = FALSE, col.names = FALSE, sep = "\t")
-    #}
   })
   
   
