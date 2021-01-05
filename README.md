@@ -25,6 +25,8 @@ Dependencias
   - stringi
   - plyr
   - dplyr
+- Las instrucciones para descargar y preparar el entorno de la aplicación se encuentran en la carpeta "environment" de este repositorio.
+
 
 Funcionamiento de la aplicación
 --------------------
@@ -83,4 +85,10 @@ La aplicación permite aplicar diferentes filtros para priorizar unas u otras va
 Una vez aplicados todos los filtros, se mostrará una tabla como la siguiente:
 <p align="center">
     <img src="media/Visualization.gif" width=100% heigth=100%>
+</p>
+
+Opcionalmente, se podrá subir un archivo de cobertura obtenida en la secuenciación en el apartado Coverage del panel de opciones. Una vez cargado en la aplicación, para cada gen seleccionado se mostrará una tabla de cobertura como a continuación:
+
+<p align="center">
+    <img src="media/Coverage.png" width=70% heigth=100%>
 </p>
